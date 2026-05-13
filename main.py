@@ -30,7 +30,7 @@ engine = create_engine(
 
 @app.get("/privacy", response_class=HTMLResponse)
 def privacy_policy():
-    with open("privacy policy.html", "r", encoding="utf-8") as f:
+    with open("privacy_policy.html", "r", encoding="utf-8") as f:
         return f.read()
 
 @app.get("/")
