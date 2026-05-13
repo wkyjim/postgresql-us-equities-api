@@ -2,14 +2,20 @@ import os
 from fastapi import FastAPI, Query
 from sqlalchemy import create_engine, text
 import pandas as pd
+from dotenv import load_dotenv
 
-app = FastAPI(title="US Equities API")
+load_dotenv()
+
+neon_password = os.getenv("neon_password")
+
+app = FastAPI(
+    title="US Equities API",
+    servers=[
+        {"url": "https://postgresql-us-equities-api.onrender.com/"}
+    ]
+)
 
 # Use Render environment variable later
-NEON_DATABASE_URL = os.getenv("NEON_DATABASE_URL")
-
-neon_password = "npg_w3miW1Ebusvg"
-
 NEON_DATABASE_URL = (
     f"postgresql://neondb_owner:{neon_password}"
     "@ep-aged-moon-ao3o4z0j-pooler.c-2.ap-southeast-1.aws.neon.tech/"
