@@ -3,9 +3,9 @@ from fastapi import FastAPI, Query
 from sqlalchemy import create_engine, text
 import pandas as pd
 from dotenv import load_dotenv
+from fastapi.responses import HTMLResponse
 
 load_dotenv()
-
 neon_password = os.getenv("neon_password")
 
 app = FastAPI(
@@ -28,6 +28,10 @@ engine = create_engine(
     pool_recycle=3600
 )
 
+@app.get("/privacy", response_class=HTMLResponse)
+def privacy_policy():
+    with open("privacy policy.html", "r", encoding="utf-8") as f:
+        return f.read()
 
 @app.get("/")
 def root():
