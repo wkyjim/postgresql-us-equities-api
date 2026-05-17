@@ -34,7 +34,7 @@ engine = create_engine(
 
 
 # ============================================================
-# RESPONSE MODELS
+# EQUITIES RESPONSE MODELS
 # ============================================================
 
 class EquityData(BaseModel):
@@ -102,6 +102,41 @@ class BatchEquityResponse(BaseModel):
     count: int
     data: List[EquityData]
 
+# ============================================================
+# MACRO RESPONSE MODELS
+# ============================================================
+
+class MacroData(BaseModel):
+    date: Optional[str] = None
+    symbol: Optional[str] = None
+    name: Optional[str] = None
+    asset_type: Optional[str] = None
+
+    open: Optional[float] = None
+    high: Optional[float] = None
+    low: Optional[float] = None
+    close: Optional[float] = None
+    adj_close: Optional[float] = None
+    volume: Optional[float] = None
+
+    prev_close: Optional[float] = None
+    change: Optional[float] = None
+    pct_chg: Optional[float] = None
+    amplitude: Optional[float] = None
+
+
+class SingleMacroResponse(BaseModel):
+    symbol: str
+    found: bool
+    data: Optional[MacroData] = None
+    message: Optional[str] = None
+
+
+class BatchMacroResponse(BaseModel):
+    requested_symbols: List[str]
+    count: int
+    data: List[MacroData]
+
 
 class RootResponse(BaseModel):
     status: str
@@ -149,9 +184,9 @@ def dataframe_to_records(df: pd.DataFrame) -> list[dict]:
 
     return records
 
-
+    
 # ============================================================
-# ROUTES
+# GENERAL ROUTES
 # ============================================================
 
 @app.get("/privacy", response_class=HTMLResponse)
@@ -188,7 +223,10 @@ def privacy_policy():
 @app.get("/", response_model=RootResponse, operation_id="healthCheck")
 def root():
     return {"status": "US Equities API running"}
-
+    
+# ============================================================
+# EQUITIES ROUTES
+# ============================================================
 
 @app.get(
     "/equities/latest/{ticker}",
@@ -353,6 +391,250 @@ def get_latest_equities(
 
     return {
         "requested_tickers": ticker_list,
+        "count": len(df),
+        "data": dataframe_to_records(df),
+    }
+
+@app.get(
+    "/equities/history/{ticker}",
+    operation_id="getEquityHistory",
+)
+def get_equity_history(
+    ticker: str,
+    start_date: Optional[str] = Query(None, description="YYYY-MM-DD"),
+    end_date: Optional[str] = Query(None, description="YYYY-MM-DD"),
+    limit: int = Query(252, ge=1, le=5000),
+):
+    sql = """
+    SELECT
+        p.date,
+        p.ticker,
+        p.name,
+        p.market,
+
+        p.open,
+        p.high,
+        p.low,
+        p.close,
+        p.change,
+        p.pct_chg,
+        p.prev_close,
+        p.turnover,
+        p.volume,
+        p.mkt_cap,
+        p.ytd_pct_chg,
+        p.pe_ttm,
+        p.amplitude,
+        p.turnover_rate,
+
+        i.ma_5,
+        i.ma_20,
+        i.ma_50,
+        i.ma_100,
+        i.ma_200,
+        i.ema_12,
+        i.ema_26,
+        i.rsi_14,
+        i.macd,
+        i.macd_signal,
+        i.macd_hist,
+        i.atr_14,
+        i.volume_ma_20,
+        i.volume_ratio_20,
+        i.high_52w,
+        i.low_52w,
+        i.return_5d,
+        i.return_20d,
+        i.return_60d,
+        i.volatility_20d
+
+    FROM public.us_equities p
+    LEFT JOIN public.us_equities_indicators i
+      ON p.ticker = i.ticker
+     AND p.date = i.date
+    WHERE p.ticker = :ticker
+      AND (:start_date IS NULL OR p.date >= CAST(:start_date AS DATE))
+      AND (:end_date IS NULL OR p.date <= CAST(:end_date AS DATE))
+    ORDER BY p.date DESC
+    LIMIT :limit
+    """
+
+    df = pd.read_sql(
+        text(sql),
+        engine,
+        params={
+            "ticker": ticker.upper(),
+            "start_date": start_date,
+            "end_date": end_date,
+            "limit": limit,
+        },
+    )
+
+    return {
+        "ticker": ticker.upper(),
+        "count": len(df),
+        "data": dataframe_to_records(df),
+    }
+    
+# ============================================================
+# MACRO ROUTES
+# ============================================================
+
+@app.get(
+    "/macro/latest/{symbol}",
+    operation_id="getLatestMacro",
+    response_model=SingleMacroResponse,
+)
+def get_latest_macro(symbol: str):
+    sql = """
+    SELECT
+        date,
+        symbol,
+        name,
+        asset_type,
+        open,
+        high,
+        low,
+        close,
+        adj_close,
+        volume,
+        prev_close,
+        change,
+        pct_chg,
+        amplitude
+    FROM public.macro
+    WHERE symbol = :symbol
+    ORDER BY date DESC
+    LIMIT 1
+    """
+
+    df = pd.read_sql(
+        text(sql),
+        engine,
+        params={"symbol": symbol.upper()},
+    )
+
+    if df.empty:
+        return {
+            "symbol": symbol.upper(),
+            "found": False,
+            "data": None,
+            "message": "Macro symbol not found",
+        }
+
+    row = normalize_row(df.iloc[0].to_dict())
+
+    return {
+        "symbol": symbol.upper(),
+        "found": True,
+        "data": row,
+        "message": None,
+    }
+
+
+@app.get(
+    "/macro/latest",
+    operation_id="getLatestMacros",
+    response_model=BatchMacroResponse,
+)
+def get_latest_macros(
+    symbols: str = Query(
+        ...,
+        description="Comma-separated symbols, e.g. ^GSPC,^TNX,BTC-USD,EURUSD=X",
+    )
+):
+    symbol_list = [
+        s.strip().upper()
+        for s in symbols.split(",")
+        if s.strip()
+    ]
+
+    sql = """
+    WITH latest AS (
+        SELECT DISTINCT ON (symbol)
+            date,
+            symbol,
+            name,
+            asset_type,
+            open,
+            high,
+            low,
+            close,
+            adj_close,
+            volume,
+            prev_close,
+            change,
+            pct_chg,
+            amplitude
+        FROM public.macro
+        WHERE symbol = ANY(:symbols)
+        ORDER BY symbol, date DESC
+    )
+    SELECT *
+    FROM latest
+    ORDER BY symbol;
+    """
+
+    df = pd.read_sql(
+        text(sql),
+        engine,
+        params={"symbols": symbol_list},
+    )
+
+    return {
+        "requested_symbols": symbol_list,
+        "count": len(df),
+        "data": dataframe_to_records(df),
+    }
+
+
+@app.get(
+    "/macro/history/{symbol}",
+    operation_id="getMacroHistory",
+)
+def get_macro_history(
+    symbol: str,
+    start_date: Optional[str] = Query(None, description="YYYY-MM-DD"),
+    end_date: Optional[str] = Query(None, description="YYYY-MM-DD"),
+    limit: int = Query(252, ge=1, le=2000),
+):
+    sql = """
+    SELECT
+        date,
+        symbol,
+        name,
+        asset_type,
+        open,
+        high,
+        low,
+        close,
+        adj_close,
+        volume,
+        prev_close,
+        change,
+        pct_chg,
+        amplitude
+    FROM public.macro
+    WHERE symbol = :symbol
+      AND (:start_date IS NULL OR date >= CAST(:start_date AS DATE))
+      AND (:end_date IS NULL OR date <= CAST(:end_date AS DATE))
+    ORDER BY date DESC
+    LIMIT :limit
+    """
+
+    df = pd.read_sql(
+        text(sql),
+        engine,
+        params={
+            "symbol": symbol.upper(),
+            "start_date": start_date,
+            "end_date": end_date,
+            "limit": limit,
+        },
+    )
+
+    return {
+        "symbol": symbol.upper(),
         "count": len(df),
         "data": dataframe_to_records(df),
     }
