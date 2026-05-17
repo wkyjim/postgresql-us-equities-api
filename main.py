@@ -311,11 +311,11 @@ def get_latest_equity(ticker: str):
 
 
 @app.get(
-    "/equities/latest",
-    operation_id="getLatestEquities",
+    "/equities/batch/latest",
+    operation_id="getLatestEquitiesBatch",
     response_model=BatchEquityResponse,
 )
-def get_latest_equities(
+def get_latest_equities_batch(
     tickers: str = Query(
         ...,
         description="Comma-separated tickers, e.g. AAPL,NVDA,MSFT",
@@ -334,7 +334,6 @@ def get_latest_equities(
             p.ticker,
             p.name,
             p.market,
-
             p.open,
             p.high,
             p.low,
@@ -533,11 +532,11 @@ def get_latest_macro(symbol: str):
 
 
 @app.get(
-    "/macro/latest",
-    operation_id="getLatestMacros",
+    "/macro/batch/latest",
+    operation_id="getLatestMacrosBatch",
     response_model=BatchMacroResponse,
 )
-def get_latest_macros(
+def get_latest_macros_batch(
     symbols: str = Query(
         ...,
         description="Comma-separated symbols, e.g. ^GSPC,^TNX,BTC-USD,EURUSD=X",
