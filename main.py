@@ -3,7 +3,7 @@ from typing import Optional, List
 
 import pandas as pd
 from dotenv import load_dotenv
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from sqlalchemy import create_engine, text
@@ -31,6 +31,8 @@ engine = create_engine(
     pool_pre_ping=True,
     pool_recycle=3600,
 )
+
+MAX_BATCH_ITEMS = 50
 
 
 # ============================================================
@@ -184,6 +186,28 @@ def dataframe_to_records(df: pd.DataFrame) -> list[dict]:
 
     return records
 
+
+def parse_csv_symbols(value: str, *, uppercase: bool = True) -> list[str]:
+    items = [
+        item.strip()
+        for item in value.split(",")
+        if item.strip()
+    ]
+
+    if uppercase:
+        items = [item.upper() for item in items]
+
+    # Preserve request order while removing duplicates before querying Neon.
+    items = list(dict.fromkeys(items))
+
+    if len(items) > MAX_BATCH_ITEMS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Batch requests are limited to {MAX_BATCH_ITEMS} symbols",
+        )
+
+    return items
+
     
 # ============================================================
 # GENERAL ROUTES
@@ -321,11 +345,7 @@ def get_latest_equities_batch(
         description="Comma-separated tickers, e.g. AAPL,NVDA,MSFT",
     )
 ):
-    ticker_list = [
-        t.strip().upper()
-        for t in tickers.split(",")
-        if t.strip()
-    ]
+    ticker_list = parse_csv_symbols(tickers)
 
     sql = """
     WITH latest AS (
@@ -542,11 +562,7 @@ def get_latest_macros_batch(
         description="Comma-separated symbols, e.g. ^GSPC,^TNX,BTC-USD,EURUSD=X",
     )
 ):
-    symbol_list = [
-        s.strip().upper()
-        for s in symbols.split(",")
-        if s.strip()
-    ]
+    symbol_list = parse_csv_symbols(symbols)
 
     sql = """
     WITH latest AS (

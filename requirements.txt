@@ -4,5 +4,3 @@ sqlalchemy
 psycopg2-binary
 pandas
 python-dotenv
-dotenv 
-load_dotenv
