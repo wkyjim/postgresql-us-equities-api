@@ -68,3 +68,13 @@ def test_invalid_custom_date_returns_http_400():
         main.validate_iso_date("07/08/2026")
 
     assert exc.value.status_code == 400
+
+
+def test_github_pages_origin_is_allowed_by_cors():
+    cors = next(
+        middleware
+        for middleware in main.app.user_middleware
+        if middleware.cls.__name__ == "CORSMiddleware"
+    )
+
+    assert "https://wkyjim.github.io" in cors.kwargs["allow_origins"]
