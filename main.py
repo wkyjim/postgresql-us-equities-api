@@ -335,14 +335,9 @@ def get_latest_equity(ticker: str):
         'close' AS data_source
 
     FROM public.us_equities p
-    LEFT JOIN LATERAL (
-        SELECT indicator.*
-        FROM public.us_equities_indicators indicator
-        WHERE indicator.ticker = p.ticker
-          AND indicator.date <= p.date
-        ORDER BY indicator.date DESC
-        LIMIT 1
-    ) i ON TRUE
+    LEFT JOIN public.us_equities_indicators i
+      ON i.ticker = p.ticker
+     AND i.date = p.date
     WHERE p.ticker = :ticker
     ORDER BY p.date DESC
     LIMIT 1
@@ -432,14 +427,9 @@ def get_latest_equities_batch(
             'close' AS data_source
 
         FROM public.us_equities p
-        LEFT JOIN LATERAL (
-            SELECT indicator.*
-            FROM public.us_equities_indicators indicator
-            WHERE indicator.ticker = p.ticker
-              AND indicator.date <= p.date
-            ORDER BY indicator.date DESC
-            LIMIT 1
-        ) i ON TRUE
+        LEFT JOIN public.us_equities_indicators i
+          ON i.ticker = p.ticker
+         AND i.date = p.date
         WHERE p.ticker = ANY(:tickers)
         ORDER BY p.ticker, p.date DESC
     )
@@ -574,14 +564,9 @@ def get_equity_by_date(
         FALSE AS is_live,
         'close' AS data_source
     FROM public.us_equities p
-    LEFT JOIN LATERAL (
-        SELECT indicator.*
-        FROM public.us_equities_indicators indicator
-        WHERE indicator.ticker = p.ticker
-          AND indicator.date <= p.date
-        ORDER BY indicator.date DESC
-        LIMIT 1
-    ) i ON TRUE
+    LEFT JOIN public.us_equities_indicators i
+      ON i.ticker = p.ticker
+     AND i.date = p.date
     WHERE p.ticker = :ticker
       AND p.date = CAST(:date AS DATE)
     LIMIT 1

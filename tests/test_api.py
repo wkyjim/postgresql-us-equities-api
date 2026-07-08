@@ -48,7 +48,7 @@ def test_equity_custom_date_is_explicitly_close_only():
         [
             {
                 "date": pd.Timestamp("2026-07-06"),
-                "indicator_date": pd.Timestamp("2026-07-02"),
+                "indicator_date": pd.Timestamp("2026-07-06"),
                 "ticker": "SPY",
                 "close": 700.0,
                 "is_live": False,
@@ -62,7 +62,19 @@ def test_equity_custom_date_is_explicitly_close_only():
     assert response["found"] is True
     assert response["data"]["ticker"] == "SPY"
     assert response["data"]["data_source"] == "close"
-    assert response["data"]["indicator_date"] == "2026-07-02 00:00:00"
+    assert response["data"]["indicator_date"] == "2026-07-06 00:00:00"
+
+
+def test_equity_queries_require_same_date_indicator_join():
+    frame = pd.DataFrame(
+        [{"date": pd.Timestamp("2026-07-07"), "ticker": "AAPL", "close": 200.0}]
+    )
+    with patch.object(main.pd, "read_sql", return_value=frame) as read_sql:
+        main.get_latest_equity("AAPL")
+
+    query = str(read_sql.call_args.args[0])
+    assert "AND i.date = p.date" in query
+    assert "indicator.date <= p.date" not in query
 
 
 def test_invalid_custom_date_returns_http_400():
