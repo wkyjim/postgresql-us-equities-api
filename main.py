@@ -1,4 +1,5 @@
 import os
+from datetime import date
 from typing import Optional, List
 
 import pandas as pd
@@ -90,6 +91,8 @@ class EquityData(BaseModel):
     return_60d: Optional[float] = None
 
     volatility_20d: Optional[float] = None
+    is_live: bool = False
+    data_source: str = "close"
 
 
 class SingleEquityResponse(BaseModel):
@@ -110,6 +113,7 @@ class BatchEquityResponse(BaseModel):
 
 class MacroData(BaseModel):
     date: Optional[str] = None
+    observed_at: Optional[str] = None
     symbol: Optional[str] = None
     name: Optional[str] = None
     asset_type: Optional[str] = None
@@ -125,6 +129,8 @@ class MacroData(BaseModel):
     change: Optional[float] = None
     pct_chg: Optional[float] = None
     amplitude: Optional[float] = None
+    is_live: bool = False
+    data_source: str = "close"
 
 
 class SingleMacroResponse(BaseModel):
@@ -150,7 +156,7 @@ class RootResponse(BaseModel):
 
 app = FastAPI(
     title="US Equities API",
-    version="1.0.0",
+    version="1.1.0",
     servers=[
         {"url": "https://postgresql-us-equities-api.onrender.com"}
     ],
@@ -170,7 +176,7 @@ def normalize_row(row: dict) -> dict:
     for key, value in row.items():
         if pd.isna(value):
             output[key] = None
-        elif key == "date":
+        elif key in {"date", "market_date", "observed_at"}:
             output[key] = str(value)
         else:
             output[key] = value
@@ -208,7 +214,17 @@ def parse_csv_symbols(value: str, *, uppercase: bool = True) -> list[str]:
 
     return items
 
-    
+
+def validate_iso_date(value: str) -> str:
+    try:
+        return date.fromisoformat(value).isoformat()
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail="Date must use YYYY-MM-DD format",
+        ) from exc
+
+
 # ============================================================
 # GENERAL ROUTES
 # ============================================================
@@ -299,7 +315,9 @@ def get_latest_equity(ticker: str):
         i.return_5d,
         i.return_20d,
         i.return_60d,
-        i.volatility_20d
+        i.volatility_20d,
+        FALSE AS is_live,
+        'close' AS data_source
 
     FROM public.us_equities p
     LEFT JOIN public.us_equities_indicators i
@@ -388,7 +406,9 @@ def get_latest_equities_batch(
             i.return_5d,
             i.return_20d,
             i.return_60d,
-            i.volatility_20d
+            i.volatility_20d,
+            FALSE AS is_live,
+            'close' AS data_source
 
         FROM public.us_equities p
         LEFT JOIN public.us_equities_indicators i
@@ -424,6 +444,11 @@ def get_equity_history(
     end_date: Optional[str] = Query(None, description="YYYY-MM-DD"),
     limit: int = Query(252, ge=1, le=5000),
 ):
+    if start_date:
+        start_date = validate_iso_date(start_date)
+    if end_date:
+        end_date = validate_iso_date(end_date)
+
     sql = """
     SELECT
         p.date,
@@ -465,7 +490,9 @@ def get_equity_history(
         i.return_5d,
         i.return_20d,
         i.return_60d,
-        i.volatility_20d
+        i.volatility_20d,
+        FALSE AS is_live,
+        'close' AS data_source
 
     FROM public.us_equities p
     LEFT JOIN public.us_equities_indicators i
@@ -494,6 +521,58 @@ def get_equity_history(
         "count": len(df),
         "data": dataframe_to_records(df),
     }
+
+
+@app.get(
+    "/equities/date/{ticker}",
+    operation_id="getEquityByDate",
+    response_model=SingleEquityResponse,
+)
+def get_equity_by_date(
+    ticker: str,
+    date_value: str = Query(..., alias="date", description="YYYY-MM-DD"),
+):
+    requested_date = validate_iso_date(date_value)
+    sql = """
+    SELECT
+        p.date, p.ticker, p.name, p.market,
+        p.open, p.high, p.low, p.close, p.change, p.pct_chg, p.prev_close,
+        p.turnover, p.volume, p.mkt_cap, p.ytd_pct_chg, p.pe_ttm,
+        p.amplitude, p.turnover_rate,
+        i.ma_5, i.ma_20, i.ma_50, i.ma_100, i.ma_200,
+        i.ema_12, i.ema_26, i.rsi_14,
+        i.macd, i.macd_signal, i.macd_hist, i.atr_14,
+        i.volume_ma_20, i.volume_ratio_20, i.high_52w, i.low_52w,
+        i.return_5d, i.return_20d, i.return_60d, i.volatility_20d,
+        FALSE AS is_live,
+        'close' AS data_source
+    FROM public.us_equities p
+    LEFT JOIN public.us_equities_indicators i
+      ON p.ticker = i.ticker
+     AND p.date = i.date
+    WHERE p.ticker = :ticker
+      AND p.date = CAST(:date AS DATE)
+    LIMIT 1
+    """
+    normalized_ticker = ticker.upper()
+    df = pd.read_sql(
+        text(sql),
+        engine,
+        params={"ticker": normalized_ticker, "date": requested_date},
+    )
+    if df.empty:
+        return {
+            "ticker": normalized_ticker,
+            "found": False,
+            "data": None,
+            "message": f"No close data found for {requested_date}",
+        }
+    return {
+        "ticker": normalized_ticker,
+        "found": True,
+        "data": normalize_row(df.iloc[0].to_dict()),
+        "message": None,
+    }
     
 # ============================================================
 # MACRO ROUTES
@@ -506,24 +585,33 @@ def get_equity_history(
 )
 def get_latest_macro(symbol: str):
     sql = """
-    SELECT
-        date,
-        symbol,
-        name,
-        asset_type,
-        open,
-        high,
-        low,
-        close,
-        adj_close,
-        volume,
-        prev_close,
-        change,
-        pct_chg,
-        amplitude
-    FROM public.macro
-    WHERE symbol = :symbol
-    ORDER BY date DESC
+    WITH live_row AS (
+        SELECT
+            market_date AS date, observed_at, symbol, name, asset_type,
+            open, high, low, close, adj_close, volume,
+            prev_close, change, pct_chg, amplitude,
+            TRUE AS is_live, 'live' AS data_source
+        FROM public.macro_live
+        WHERE symbol = :symbol
+          AND is_market_closed = FALSE
+        ORDER BY observed_at DESC
+        LIMIT 1
+    ),
+    close_row AS (
+        SELECT
+            date, NULL::timestamptz AS observed_at, symbol, name, asset_type,
+            open, high, low, close, adj_close, volume,
+            prev_close, change, pct_chg, amplitude,
+            FALSE AS is_live, 'close' AS data_source
+        FROM public.macro
+        WHERE symbol = :symbol
+        ORDER BY date DESC
+        LIMIT 1
+    )
+    SELECT * FROM live_row
+    UNION ALL
+    SELECT * FROM close_row
+    WHERE NOT EXISTS (SELECT 1 FROM live_row)
     LIMIT 1
     """
 
@@ -565,25 +653,37 @@ def get_latest_macros_batch(
     symbol_list = parse_csv_symbols(symbols)
 
     sql = """
-    WITH latest AS (
+    WITH live_latest AS (
         SELECT DISTINCT ON (symbol)
-            date,
-            symbol,
-            name,
-            asset_type,
-            open,
-            high,
-            low,
-            close,
-            adj_close,
-            volume,
-            prev_close,
-            change,
-            pct_chg,
-            amplitude
+            market_date AS date, observed_at, symbol, name, asset_type,
+            open, high, low, close, adj_close, volume,
+            prev_close, change, pct_chg, amplitude,
+            TRUE AS is_live, 'live' AS data_source
+        FROM public.macro_live
+        WHERE symbol = ANY(:symbols)
+          AND is_market_closed = FALSE
+        ORDER BY symbol, observed_at DESC
+    ),
+    close_latest AS (
+        SELECT DISTINCT ON (symbol)
+            date, NULL::timestamptz AS observed_at, symbol, name, asset_type,
+            open, high, low, close, adj_close, volume,
+            prev_close, change, pct_chg, amplitude,
+            FALSE AS is_live, 'close' AS data_source
         FROM public.macro
         WHERE symbol = ANY(:symbols)
         ORDER BY symbol, date DESC
+    ),
+    latest AS (
+        SELECT * FROM live_latest
+        UNION ALL
+        SELECT close_latest.*
+        FROM close_latest
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM live_latest
+            WHERE live_latest.symbol = close_latest.symbol
+        )
     )
     SELECT *
     FROM latest
@@ -604,6 +704,114 @@ def get_latest_macros_batch(
 
 
 @app.get(
+    "/macro/live/{symbol}",
+    operation_id="getLiveMacro",
+    response_model=SingleMacroResponse,
+)
+def get_live_macro(symbol: str):
+    normalized_symbol = symbol.upper()
+    sql = """
+    SELECT
+        market_date AS date, observed_at, symbol, name, asset_type,
+        open, high, low, close, adj_close, volume,
+        prev_close, change, pct_chg, amplitude,
+        TRUE AS is_live, 'live' AS data_source
+    FROM public.macro_live
+    WHERE symbol = :symbol
+      AND is_market_closed = FALSE
+    ORDER BY observed_at DESC
+    LIMIT 1
+    """
+    df = pd.read_sql(text(sql), engine, params={"symbol": normalized_symbol})
+    if df.empty:
+        return {
+            "symbol": normalized_symbol,
+            "found": False,
+            "data": None,
+            "message": "No active live macro snapshot; use /macro/latest for close fallback",
+        }
+    return {
+        "symbol": normalized_symbol,
+        "found": True,
+        "data": normalize_row(df.iloc[0].to_dict()),
+        "message": None,
+    }
+
+
+@app.get(
+    "/macro/batch/live",
+    operation_id="getLiveMacrosBatch",
+    response_model=BatchMacroResponse,
+)
+def get_live_macros_batch(
+    symbols: str = Query(
+        ...,
+        description="Comma-separated symbols. Returns active live snapshots only.",
+    )
+):
+    symbol_list = parse_csv_symbols(symbols)
+    sql = """
+    SELECT
+        market_date AS date, observed_at, symbol, name, asset_type,
+        open, high, low, close, adj_close, volume,
+        prev_close, change, pct_chg, amplitude,
+        TRUE AS is_live, 'live' AS data_source
+    FROM public.macro_live
+    WHERE symbol = ANY(:symbols)
+      AND is_market_closed = FALSE
+    ORDER BY symbol
+    """
+    df = pd.read_sql(text(sql), engine, params={"symbols": symbol_list})
+    return {
+        "requested_symbols": symbol_list,
+        "count": len(df),
+        "data": dataframe_to_records(df),
+    }
+
+
+@app.get(
+    "/macro/date/{symbol}",
+    operation_id="getMacroByDate",
+    response_model=SingleMacroResponse,
+)
+def get_macro_by_date(
+    symbol: str,
+    date_value: str = Query(..., alias="date", description="YYYY-MM-DD"),
+):
+    requested_date = validate_iso_date(date_value)
+    normalized_symbol = symbol.upper()
+    sql = """
+    SELECT
+        date, NULL::timestamptz AS observed_at, symbol, name, asset_type,
+        open, high, low, close, adj_close, volume,
+        prev_close, change, pct_chg, amplitude,
+        FALSE AS is_live, 'close' AS data_source
+    FROM public.macro
+    WHERE symbol = :symbol
+      AND date = CAST(:date AS DATE)
+    LIMIT 1
+    """
+    df = pd.read_sql(
+        text(sql),
+        engine,
+        params={"symbol": normalized_symbol, "date": requested_date},
+    )
+    if df.empty:
+        return {
+            "symbol": normalized_symbol,
+            "found": False,
+            "data": None,
+            "message": f"No close data found for {requested_date}",
+        }
+    return {
+        "symbol": normalized_symbol,
+        "found": True,
+        "data": normalize_row(df.iloc[0].to_dict()),
+        "message": None,
+    }
+
+
+@app.get(
     "/macro/history/{symbol}",
     operation_id="getMacroHistory",
 )
@@ -613,9 +821,15 @@ def get_macro_history(
     end_date: Optional[str] = Query(None, description="YYYY-MM-DD"),
     limit: int = Query(252, ge=1, le=2000),
 ):
+    if start_date:
+        start_date = validate_iso_date(start_date)
+    if end_date:
+        end_date = validate_iso_date(end_date)
+
     sql = """
     SELECT
         date,
+        NULL::timestamptz AS observed_at,
         symbol,
         name,
         asset_type,
@@ -628,7 +842,9 @@ def get_macro_history(
         prev_close,
         change,
         pct_chg,
-        amplitude
+        amplitude,
+        FALSE AS is_live,
+        'close' AS data_source
     FROM public.macro
     WHERE symbol = :symbol
       AND (:start_date IS NULL OR date >= CAST(:start_date AS DATE))
