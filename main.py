@@ -43,6 +43,7 @@ MAX_BATCH_ITEMS = 50
 
 class EquityData(BaseModel):
     date: Optional[str] = None
+    indicator_date: Optional[str] = None
     ticker: Optional[str] = None
     name: Optional[str] = None
     market: Optional[str] = None
@@ -189,7 +190,7 @@ def normalize_row(row: dict) -> dict:
     for key, value in row.items():
         if pd.isna(value):
             output[key] = None
-        elif key in {"date", "market_date", "observed_at"}:
+        elif key in {"date", "indicator_date", "market_date", "observed_at"}:
             output[key] = str(value)
         else:
             output[key] = value
@@ -290,6 +291,7 @@ def get_latest_equity(ticker: str):
     sql = """
     SELECT
         p.date,
+        i.date AS indicator_date,
         p.ticker,
         p.name,
         p.market,
@@ -333,9 +335,14 @@ def get_latest_equity(ticker: str):
         'close' AS data_source
 
     FROM public.us_equities p
-    LEFT JOIN public.us_equities_indicators i
-      ON p.ticker = i.ticker
-     AND p.date = i.date
+    LEFT JOIN LATERAL (
+        SELECT indicator.*
+        FROM public.us_equities_indicators indicator
+        WHERE indicator.ticker = p.ticker
+          AND indicator.date <= p.date
+        ORDER BY indicator.date DESC
+        LIMIT 1
+    ) i ON TRUE
     WHERE p.ticker = :ticker
     ORDER BY p.date DESC
     LIMIT 1
@@ -382,6 +389,7 @@ def get_latest_equities_batch(
     WITH latest AS (
         SELECT DISTINCT ON (p.ticker)
             p.date,
+            i.date AS indicator_date,
             p.ticker,
             p.name,
             p.market,
@@ -424,9 +432,14 @@ def get_latest_equities_batch(
             'close' AS data_source
 
         FROM public.us_equities p
-        LEFT JOIN public.us_equities_indicators i
-          ON p.ticker = i.ticker
-         AND p.date = i.date
+        LEFT JOIN LATERAL (
+            SELECT indicator.*
+            FROM public.us_equities_indicators indicator
+            WHERE indicator.ticker = p.ticker
+              AND indicator.date <= p.date
+            ORDER BY indicator.date DESC
+            LIMIT 1
+        ) i ON TRUE
         WHERE p.ticker = ANY(:tickers)
         ORDER BY p.ticker, p.date DESC
     )
@@ -465,6 +478,7 @@ def get_equity_history(
     sql = """
     SELECT
         p.date,
+        i.date AS indicator_date,
         p.ticker,
         p.name,
         p.market,
@@ -548,7 +562,7 @@ def get_equity_by_date(
     requested_date = validate_iso_date(date_value)
     sql = """
     SELECT
-        p.date, p.ticker, p.name, p.market,
+        p.date, i.date AS indicator_date, p.ticker, p.name, p.market,
         p.open, p.high, p.low, p.close, p.change, p.pct_chg, p.prev_close,
         p.turnover, p.volume, p.mkt_cap, p.ytd_pct_chg, p.pe_ttm,
         p.amplitude, p.turnover_rate,
@@ -560,9 +574,14 @@ def get_equity_by_date(
         FALSE AS is_live,
         'close' AS data_source
     FROM public.us_equities p
-    LEFT JOIN public.us_equities_indicators i
-      ON p.ticker = i.ticker
-     AND p.date = i.date
+    LEFT JOIN LATERAL (
+        SELECT indicator.*
+        FROM public.us_equities_indicators indicator
+        WHERE indicator.ticker = p.ticker
+          AND indicator.date <= p.date
+        ORDER BY indicator.date DESC
+        LIMIT 1
+    ) i ON TRUE
     WHERE p.ticker = :ticker
       AND p.date = CAST(:date AS DATE)
     LIMIT 1

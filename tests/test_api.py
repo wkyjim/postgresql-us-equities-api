@@ -48,6 +48,7 @@ def test_equity_custom_date_is_explicitly_close_only():
         [
             {
                 "date": pd.Timestamp("2026-07-06"),
+                "indicator_date": pd.Timestamp("2026-07-02"),
                 "ticker": "SPY",
                 "close": 700.0,
                 "is_live": False,
@@ -61,6 +62,7 @@ def test_equity_custom_date_is_explicitly_close_only():
     assert response["found"] is True
     assert response["data"]["ticker"] == "SPY"
     assert response["data"]["data_source"] == "close"
+    assert response["data"]["indicator_date"] == "2026-07-02 00:00:00"
 
 
 def test_invalid_custom_date_returns_http_400():
