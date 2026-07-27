@@ -148,6 +148,18 @@ class BatchMacroResponse(BaseModel):
     data: List[MacroData]
 
 
+class MarketTapeItem(MacroData):
+    group: str
+    display_name: str
+    change_bps: Optional[float] = None
+
+
+class MarketTapeResponse(BaseModel):
+    count: int
+    groups: dict[str, List[MarketTapeItem]]
+    data: List[MarketTapeItem]
+
+
 class RootResponse(BaseModel):
     status: str
 
@@ -229,6 +241,15 @@ def parse_csv_symbols(value: str, *, uppercase: bool = True) -> list[str]:
     return items
 
 
+def normalize_macro_symbol(value: str) -> str:
+    """Macro symbols can be case-sensitive in Neon, especially Investing.com codes."""
+    return value.strip()
+
+
+def macro_lookup_values(symbols: list[str]) -> list[str]:
+    return [symbol.lower() for symbol in symbols]
+
+
 def validate_iso_date(value: str) -> str:
     try:
         return date.fromisoformat(value).isoformat()
@@ -237,6 +258,66 @@ def validate_iso_date(value: str) -> str:
             status_code=400,
             detail="Date must use YYYY-MM-DD format",
         ) from exc
+
+
+MARKET_TAPE_GROUPS = {
+    "asia_equity_indices": [
+        ("^HSI", "Hang Seng"),
+        ("^N225", "Nikkei 225"),
+        ("^KS11", "KOSPI"),
+        ("000001.SS", "SSE Composite"),
+    ],
+    "index_futures": [
+        ("ES=F", "S&P 500 Future"),
+        ("NQ=F", "Nasdaq 100 Future"),
+        ("YM=F", "Dow Future"),
+        ("RTY=F", "Russell 2000 Future"),
+        ("HK50", "Hang Seng Future"),
+        ("NIY=F", "Nikkei Future"),
+        ("KOR200c1", "KOSPI 200 Future"),
+        ("CIHc1", "SSE 50 Future"),
+    ],
+    "ust_yields": [
+        ("US2YT=X", "UST 2Y"),
+        ("US3YT=X", "UST 3Y"),
+        ("US5YT=X", "UST 5Y"),
+        ("US7YT=X", "UST 7Y"),
+        ("US10YT=X", "UST 10Y"),
+        ("US20YT=X", "UST 20Y"),
+        ("US30YT=X", "UST 30Y"),
+    ],
+    "volatility": [
+        ("^VIX", "VIX"),
+        ("^SKEW", "CBOE SKEW"),
+    ],
+}
+
+
+def market_tape_symbols() -> list[str]:
+    symbols = []
+    for rows in MARKET_TAPE_GROUPS.values():
+        symbols.extend(symbol for symbol, _label in rows)
+    return symbols
+
+
+def market_tape_metadata() -> dict[str, tuple[str, str]]:
+    metadata = {}
+    for group, rows in MARKET_TAPE_GROUPS.items():
+        for symbol, label in rows:
+            metadata[symbol] = (group, label)
+    return metadata
+
+
+def add_market_tape_fields(row: dict, metadata: dict[str, tuple[str, str]]) -> dict:
+    symbol = row.get("symbol")
+    group, label = metadata.get(symbol, ("other", symbol or "Unknown"))
+    enriched = dict(row)
+    enriched["group"] = group
+    enriched["display_name"] = label
+    enriched["change_bps"] = None
+    if group == "ust_yields" and enriched.get("change") is not None:
+        enriched["change_bps"] = round(float(enriched["change"]) * 100, 4)
+    return enriched
 
 
 # ============================================================
@@ -601,6 +682,7 @@ def get_equity_by_date(
     response_model=SingleMacroResponse,
 )
 def get_latest_macro(symbol: str):
+    requested_symbol = normalize_macro_symbol(symbol)
     sql = """
     WITH live_row AS (
         SELECT
@@ -609,7 +691,7 @@ def get_latest_macro(symbol: str):
             prev_close, change, pct_chg, amplitude,
             TRUE AS is_live, 'live' AS data_source
         FROM public.macro_live
-        WHERE symbol = :symbol
+        WHERE lower(symbol) = :symbol_lookup
           AND is_market_closed = FALSE
         ORDER BY observed_at DESC
         LIMIT 1
@@ -621,7 +703,7 @@ def get_latest_macro(symbol: str):
             prev_close, change, pct_chg, amplitude,
             FALSE AS is_live, 'close' AS data_source
         FROM public.macro
-        WHERE symbol = :symbol
+        WHERE lower(symbol) = :symbol_lookup
         ORDER BY date DESC
         LIMIT 1
     )
@@ -635,12 +717,12 @@ def get_latest_macro(symbol: str):
     df = pd.read_sql(
         text(sql),
         engine,
-        params={"symbol": symbol.upper()},
+        params={"symbol_lookup": requested_symbol.lower()},
     )
 
     if df.empty:
         return {
-            "symbol": symbol.upper(),
+            "symbol": requested_symbol,
             "found": False,
             "data": None,
             "message": "Macro symbol not found",
@@ -649,7 +731,7 @@ def get_latest_macro(symbol: str):
     row = normalize_row(df.iloc[0].to_dict())
 
     return {
-        "symbol": symbol.upper(),
+        "symbol": row.get("symbol") or requested_symbol,
         "found": True,
         "data": row,
         "message": None,
@@ -667,8 +749,68 @@ def get_latest_macros_batch(
         description="Comma-separated symbols, e.g. ^GSPC,^TNX,BTC-USD,EURUSD=X",
     )
 ):
-    symbol_list = parse_csv_symbols(symbols)
+    symbol_list = parse_csv_symbols(symbols, uppercase=False)
+    symbol_lookup = macro_lookup_values(symbol_list)
 
+    sql = """
+    WITH live_latest AS (
+        SELECT DISTINCT ON (symbol)
+            market_date AS date, observed_at, symbol, name, asset_type,
+            open, high, low, close, adj_close, volume,
+            prev_close, change, pct_chg, amplitude,
+            TRUE AS is_live, 'live' AS data_source
+        FROM public.macro_live
+        WHERE lower(symbol) = ANY(:symbol_lookup)
+          AND is_market_closed = FALSE
+        ORDER BY symbol, observed_at DESC
+    ),
+    close_latest AS (
+        SELECT DISTINCT ON (symbol)
+            date, NULL::timestamptz AS observed_at, symbol, name, asset_type,
+            open, high, low, close, adj_close, volume,
+            prev_close, change, pct_chg, amplitude,
+            FALSE AS is_live, 'close' AS data_source
+        FROM public.macro
+        WHERE lower(symbol) = ANY(:symbol_lookup)
+        ORDER BY symbol, date DESC
+    ),
+    latest AS (
+        SELECT * FROM live_latest
+        UNION ALL
+        SELECT close_latest.*
+        FROM close_latest
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM live_latest
+            WHERE live_latest.symbol = close_latest.symbol
+        )
+    )
+    SELECT *
+    FROM latest
+    ORDER BY symbol;
+    """
+
+    df = pd.read_sql(
+        text(sql),
+        engine,
+        params={"symbol_lookup": symbol_lookup},
+    )
+
+    return {
+        "requested_symbols": symbol_list,
+        "count": len(df),
+        "data": dataframe_to_records(df),
+    }
+
+
+@app.get(
+    "/market-tape",
+    operation_id="getMarketTape",
+    response_model=MarketTapeResponse,
+)
+def get_market_tape():
+    symbol_list = market_tape_symbols()
+    metadata = market_tape_metadata()
     sql = """
     WITH live_latest AS (
         SELECT DISTINCT ON (symbol)
@@ -707,16 +849,29 @@ def get_latest_macros_batch(
     ORDER BY symbol;
     """
 
-    df = pd.read_sql(
-        text(sql),
-        engine,
-        params={"symbols": symbol_list},
-    )
+    df = pd.read_sql(text(sql), engine, params={"symbols": symbol_list})
+    records = [
+        add_market_tape_fields(row, metadata)
+        for row in dataframe_to_records(df)
+    ]
+    record_by_symbol = {row.get("symbol"): row for row in records}
+    ordered_records = [
+        record_by_symbol[symbol]
+        for symbol in symbol_list
+        if symbol in record_by_symbol
+    ]
+
+    groups = {}
+    for group, rows in MARKET_TAPE_GROUPS.items():
+        symbols = [symbol for symbol, _label in rows]
+        groups[group] = [
+            row for row in ordered_records if row.get("symbol") in symbols
+        ]
 
     return {
-        "requested_symbols": symbol_list,
-        "count": len(df),
-        "data": dataframe_to_records(df),
+        "count": len(ordered_records),
+        "groups": groups,
+        "data": ordered_records,
     }
 
 
@@ -726,7 +881,7 @@ def get_latest_macros_batch(
     response_model=SingleMacroResponse,
 )
 def get_live_macro(symbol: str):
-    normalized_symbol = symbol.upper()
+    normalized_symbol = normalize_macro_symbol(symbol)
     sql = """
     SELECT
         market_date AS date, observed_at, symbol, name, asset_type,
@@ -734,12 +889,12 @@ def get_live_macro(symbol: str):
         prev_close, change, pct_chg, amplitude,
         TRUE AS is_live, 'live' AS data_source
     FROM public.macro_live
-    WHERE symbol = :symbol
+    WHERE lower(symbol) = :symbol_lookup
       AND is_market_closed = FALSE
     ORDER BY observed_at DESC
     LIMIT 1
     """
-    df = pd.read_sql(text(sql), engine, params={"symbol": normalized_symbol})
+    df = pd.read_sql(text(sql), engine, params={"symbol_lookup": normalized_symbol.lower()})
     if df.empty:
         return {
             "symbol": normalized_symbol,
@@ -747,10 +902,11 @@ def get_live_macro(symbol: str):
             "data": None,
             "message": "No active live macro snapshot; use /macro/latest for close fallback",
         }
+    row = normalize_row(df.iloc[0].to_dict())
     return {
-        "symbol": normalized_symbol,
+        "symbol": row.get("symbol") or normalized_symbol,
         "found": True,
-        "data": normalize_row(df.iloc[0].to_dict()),
+        "data": row,
         "message": None,
     }
 
@@ -766,7 +922,8 @@ def get_live_macros_batch(
         description="Comma-separated symbols. Returns active live snapshots only.",
     )
 ):
-    symbol_list = parse_csv_symbols(symbols)
+    symbol_list = parse_csv_symbols(symbols, uppercase=False)
+    symbol_lookup = macro_lookup_values(symbol_list)
     sql = """
     SELECT
         market_date AS date, observed_at, symbol, name, asset_type,
@@ -774,11 +931,11 @@ def get_live_macros_batch(
         prev_close, change, pct_chg, amplitude,
         TRUE AS is_live, 'live' AS data_source
     FROM public.macro_live
-    WHERE symbol = ANY(:symbols)
+    WHERE lower(symbol) = ANY(:symbol_lookup)
       AND is_market_closed = FALSE
     ORDER BY symbol
     """
-    df = pd.read_sql(text(sql), engine, params={"symbols": symbol_list})
+    df = pd.read_sql(text(sql), engine, params={"symbol_lookup": symbol_lookup})
     return {
         "requested_symbols": symbol_list,
         "count": len(df),
@@ -796,7 +953,7 @@ def get_macro_by_date(
     date_value: str = Query(..., alias="date", description="YYYY-MM-DD"),
 ):
     requested_date = validate_iso_date(date_value)
-    normalized_symbol = symbol.upper()
+    normalized_symbol = normalize_macro_symbol(symbol)
     sql = """
     SELECT
         date, NULL::timestamptz AS observed_at, symbol, name, asset_type,
@@ -804,14 +961,14 @@ def get_macro_by_date(
         prev_close, change, pct_chg, amplitude,
         FALSE AS is_live, 'close' AS data_source
     FROM public.macro
-    WHERE symbol = :symbol
+    WHERE lower(symbol) = :symbol_lookup
       AND date = CAST(:date AS DATE)
     LIMIT 1
     """
     df = pd.read_sql(
         text(sql),
         engine,
-        params={"symbol": normalized_symbol, "date": requested_date},
+        params={"symbol_lookup": normalized_symbol.lower(), "date": requested_date},
     )
     if df.empty:
         return {
@@ -820,10 +977,11 @@ def get_macro_by_date(
             "data": None,
             "message": f"No close data found for {requested_date}",
         }
+    row = normalize_row(df.iloc[0].to_dict())
     return {
-        "symbol": normalized_symbol,
+        "symbol": row.get("symbol") or normalized_symbol,
         "found": True,
-        "data": normalize_row(df.iloc[0].to_dict()),
+        "data": row,
         "message": None,
     }
 
@@ -838,6 +996,7 @@ def get_macro_history(
     end_date: Optional[str] = Query(None, description="YYYY-MM-DD"),
     limit: int = Query(252, ge=1, le=2000),
 ):
+    normalized_symbol = normalize_macro_symbol(symbol)
     if start_date:
         start_date = validate_iso_date(start_date)
     if end_date:
@@ -863,7 +1022,7 @@ def get_macro_history(
         FALSE AS is_live,
         'close' AS data_source
     FROM public.macro
-    WHERE symbol = :symbol
+    WHERE lower(symbol) = :symbol_lookup
       AND (:start_date IS NULL OR date >= CAST(:start_date AS DATE))
       AND (:end_date IS NULL OR date <= CAST(:end_date AS DATE))
     ORDER BY date DESC
@@ -874,7 +1033,7 @@ def get_macro_history(
         text(sql),
         engine,
         params={
-            "symbol": symbol.upper(),
+            "symbol_lookup": normalized_symbol.lower(),
             "start_date": start_date,
             "end_date": end_date,
             "limit": limit,
@@ -882,7 +1041,7 @@ def get_macro_history(
     )
 
     return {
-        "symbol": symbol.upper(),
+        "symbol": normalized_symbol,
         "count": len(df),
         "data": dataframe_to_records(df),
     }
