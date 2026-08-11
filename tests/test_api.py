@@ -6,6 +6,7 @@ from unittest.mock import patch
 import pandas as pd
 import pytest
 from fastapi import HTTPException
+from fastapi.testclient import TestClient
 
 os.environ.setdefault("neon_password", "test-only")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -124,6 +125,67 @@ def test_github_pages_origin_is_allowed_by_cors():
     )
 
     assert "https://wkyjim.github.io" in cors.kwargs["allow_origins"]
+
+
+def test_telegram_webhook_rejects_bad_path_secret(monkeypatch):
+    monkeypatch.setenv("TG_webhook_secret", "correct-secret")
+    client = TestClient(main.app)
+
+    response = client.post(
+        "/telegram/webhook/wrong-secret",
+        json={"message": {"text": "/start", "chat": {"id": "123"}}},
+    )
+
+    assert response.status_code == 403
+
+
+def test_telegram_webhook_handles_start_command(monkeypatch):
+    monkeypatch.setenv("TG_webhook_secret", "test-secret")
+    monkeypatch.setenv("TG_chat_id", "123")
+    monkeypatch.setenv("TG_token", "test-token")
+    client = TestClient(main.app)
+
+    with patch.object(main, "send_telegram_text", return_value=1) as send_message:
+        response = client.post(
+            "/telegram/webhook/test-secret",
+            json={"message": {"text": "/start", "chat": {"id": "123"}}},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["handled"] is True
+    assert response.json()["command"] == "/start"
+    assert "/market" in send_message.call_args.args[0]
+
+
+def test_telegram_webhook_ignores_unauthorized_chat(monkeypatch):
+    monkeypatch.setenv("TG_webhook_secret", "test-secret")
+    monkeypatch.setenv("TG_chat_id", "123")
+    client = TestClient(main.app)
+
+    with patch.object(main, "send_telegram_text") as send_message:
+        response = client.post(
+            "/telegram/webhook/test-secret",
+            json={"message": {"text": "/start", "chat": {"id": "999"}}},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["handled"] is False
+    send_message.assert_not_called()
+
+
+def test_register_telegram_webhook_uses_render_base_url(monkeypatch):
+    monkeypatch.setenv("TG_webhook_secret", "test-secret")
+    monkeypatch.setenv("TG_token", "test-token")
+    monkeypatch.setenv("TG_RENDER_BASE_URL", "https://example.onrender.com")
+    client = TestClient(main.app)
+
+    with patch.object(main, "telegram_api_post", return_value={"ok": True}) as api_post:
+        response = client.post("/telegram/webhook/register/test-secret")
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    assert api_post.call_args.args[0] == "setWebhook"
+    assert api_post.call_args.args[1]["url"] == "https://example.onrender.com/telegram/webhook/test-secret"
 
 
 def test_market_tape_groups_asia_futures_and_ust_bps():
