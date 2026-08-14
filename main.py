@@ -273,8 +273,8 @@ def _short_filter_sql(
             clauses.append(f"lower({field}) = :{field}")
             params[field] = value.lower()
     if ticker:
-        clauses.append("(ticker ILIKE :ticker OR name ILIKE :ticker)")
-        params["ticker"] = f"%{ticker.strip()}%"
+        clauses.append("upper(ticker) = upper(:ticker)")
+        params["ticker"] = ticker.strip()
     thresholds = {
         "funding_short_score": min_funding_short_score,
         "funding_short_quality_score": min_funding_short_quality,

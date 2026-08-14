@@ -291,6 +291,24 @@ def test_short_analytics_rejects_unknown_sort_column():
     assert exc.value.status_code == 400
 
 
+def test_short_analytics_ticker_filter_is_exact():
+    with patch.object(
+        main.pd,
+        "read_sql",
+        side_effect=[pd.DataFrame([{"total": 1}]), pd.DataFrame([{"ticker": "AMD"}])],
+    ) as read_sql:
+        response = main.get_latest_short_analytics(
+            ticker="amd", sort_by="funding_short_score", sort_order="desc"
+        )
+
+    list_query = str(read_sql.call_args_list[1].args[0])
+    list_params = read_sql.call_args_list[1].kwargs["params"]
+    assert "upper(ticker) = upper(:ticker)" in list_query
+    assert "name ILIKE" not in list_query
+    assert list_params["ticker"] == "amd"
+    assert response["data"][0]["ticker"] == "AMD"
+
+
 def test_short_analytics_ticker_lookup_and_not_found():
     row = pd.DataFrame([{"ticker": "AMD", "short_interest": None, "analytics_date": pd.Timestamp("2026-08-12")}])
     with patch.object(main.pd, "read_sql", return_value=row):
