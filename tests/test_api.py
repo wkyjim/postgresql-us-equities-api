@@ -266,3 +266,39 @@ def test_equity_history_contains_ohlcv_fields_for_candlestick_chart():
     assert row["low"] == 188.0
     assert row["close"] == 194.0
     assert row["volume"] == 1000000
+
+
+def test_short_analytics_list_defaults_to_common_stocks_and_sorts_numeric():
+    count = pd.DataFrame([{"total": 1}])
+    rows = pd.DataFrame([{
+        "ticker": "AMD", "analytics_date": pd.Timestamp("2026-08-12"),
+        "security_type": "common_stock", "funding_short_score": 72.5,
+        "regime_reason_json": '{"short_interest_is_publication_gated": true}',
+    }])
+    with patch.object(main.pd, "read_sql", side_effect=[count, rows]) as read_sql:
+        response = main.get_latest_short_analytics(sort_by="funding_short_score", sort_order="desc")
+
+    list_query = str(read_sql.call_args_list[1].args[0])
+    assert "security_type = 'common_stock'" in list_query
+    assert "ORDER BY funding_short_score DESC" in list_query
+    assert response["total"] == 1
+    assert response["data"][0]["regime_reason_json"]["short_interest_is_publication_gated"] is True
+
+
+def test_short_analytics_rejects_unknown_sort_column():
+    with pytest.raises(HTTPException) as exc:
+        main.get_latest_short_analytics(sort_by="ticker; DROP TABLE x", sort_order="desc")
+    assert exc.value.status_code == 400
+
+
+def test_short_analytics_ticker_lookup_and_not_found():
+    row = pd.DataFrame([{"ticker": "AMD", "short_interest": None, "analytics_date": pd.Timestamp("2026-08-12")}])
+    with patch.object(main.pd, "read_sql", return_value=row):
+        response = main.get_latest_short_analytics_ticker("amd")
+    assert response["ticker"] == "AMD"
+    assert response["data"]["short_interest"] is None
+
+    with patch.object(main.pd, "read_sql", return_value=pd.DataFrame()):
+        with pytest.raises(HTTPException) as exc:
+            main.get_latest_short_analytics_ticker("missing")
+    assert exc.value.status_code == 404

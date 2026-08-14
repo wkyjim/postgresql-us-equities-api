@@ -1,5 +1,6 @@
 import os
 import json
+import math
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -211,10 +212,17 @@ def normalize_row(row: dict) -> dict:
     output = {}
 
     for key, value in row.items():
-        if pd.isna(value):
+        if isinstance(value, float) and not math.isfinite(value):
             output[key] = None
-        elif key in {"date", "indicator_date", "market_date", "observed_at"}:
+        elif value is None or (not isinstance(value, (dict, list, tuple)) and pd.isna(value)):
+            output[key] = None
+        elif key.endswith("_date") or key.endswith("_at") or key in {"date", "indicator_date", "market_date", "observed_at"}:
             output[key] = str(value)
+        elif key == "regime_reason_json" and isinstance(value, str):
+            try:
+                output[key] = json.loads(value)
+            except json.JSONDecodeError:
+                output[key] = {"unparsed": value}
         else:
             output[key] = value
 
@@ -228,6 +236,57 @@ def dataframe_to_records(df: pd.DataFrame) -> list[dict]:
         records.append(normalize_row(row.to_dict()))
 
     return records
+
+
+SHORT_ANALYTICS_SORT_COLUMNS = {
+    "ticker", "name", "sector", "industry", "analytics_date", "latest_price",
+    "short_interest", "days_to_cover", "si_change_pct_latest", "si_slope_6m",
+    "si_persistence_12m", "svr_5d", "svr_20d", "svr_z20", "casv_10d",
+    "short_activity_score", "short_position_score", "funding_short_score",
+    "funding_short_quality_score", "unwind_risk_score", "short_pressure_effectiveness",
+    "rsi14", "price_vs_ma50_pct", "price_vs_ma200_pct", "regime_confidence",
+}
+
+
+def _short_sort_column(sort_by: str) -> str:
+    if sort_by not in SHORT_ANALYTICS_SORT_COLUMNS:
+        raise HTTPException(status_code=400, detail="Unsupported short-analytics sort field")
+    return sort_by
+
+
+def _short_filter_sql(
+    *, ticker: str | None, sector: str | None, industry: str | None,
+    security_type: str | None, regime: str | None, expected_si_direction: str | None,
+    min_funding_short_score: float | None, min_funding_short_quality: float | None,
+    min_short_activity_score: float | None, min_short_position_score: float | None,
+    min_unwind_risk: float | None,
+) -> tuple[str, dict]:
+    clauses = []
+    params: dict[str, object] = {}
+    if security_type is None:
+        clauses.append("security_type = 'common_stock'")
+    elif security_type.lower() != "all":
+        clauses.append("lower(security_type) = :security_type")
+        params["security_type"] = security_type.lower()
+    for field, value in (("sector", sector), ("industry", industry), ("short_regime", regime), ("expected_si_direction", expected_si_direction)):
+        if value:
+            clauses.append(f"lower({field}) = :{field}")
+            params[field] = value.lower()
+    if ticker:
+        clauses.append("(ticker ILIKE :ticker OR name ILIKE :ticker)")
+        params["ticker"] = f"%{ticker.strip()}%"
+    thresholds = {
+        "funding_short_score": min_funding_short_score,
+        "funding_short_quality_score": min_funding_short_quality,
+        "short_activity_score": min_short_activity_score,
+        "short_position_score": min_short_position_score,
+        "unwind_risk_score": min_unwind_risk,
+    }
+    for field, value in thresholds.items():
+        if value is not None:
+            clauses.append(f"{field} >= :{field}")
+            params[field] = value
+    return (" AND ".join(clauses) if clauses else "TRUE"), params
 
 
 def parse_csv_symbols(value: str, *, uppercase: bool = True) -> list[str]:
@@ -772,6 +831,90 @@ async def telegram_webhook(
         "command": text_value.split()[0],
         "message": "Command handled.",
     }
+
+
+# ============================================================
+# LATEST SHORT-POSITIONING SNAPSHOT ROUTES
+# ============================================================
+
+@app.get("/short-analytics/latest", operation_id="getLatestShortAnalytics")
+def get_latest_short_analytics(
+    limit: int = Query(50, ge=1, le=250),
+    offset: int = Query(0, ge=0),
+    ticker: Optional[str] = None,
+    sector: Optional[str] = None,
+    industry: Optional[str] = None,
+    security_type: Optional[str] = None,
+    regime: Optional[str] = None,
+    expected_si_direction: Optional[str] = None,
+    min_funding_short_score: Optional[float] = Query(None, ge=0, le=100),
+    min_funding_short_quality: Optional[float] = Query(None, ge=0, le=100),
+    min_short_activity_score: Optional[float] = Query(None, ge=0, le=100),
+    min_short_position_score: Optional[float] = Query(None, ge=0, le=100),
+    min_unwind_risk: Optional[float] = Query(None, ge=0, le=100),
+    sort_by: str = "funding_short_score",
+    sort_order: str = Query("desc", pattern="^(?i:asc|desc)$"),
+):
+    sort_column = _short_sort_column(sort_by)
+    direction = "ASC" if sort_order.lower() == "asc" else "DESC"
+    where, params = _short_filter_sql(
+        ticker=ticker, sector=sector, industry=industry, security_type=security_type,
+        regime=regime, expected_si_direction=expected_si_direction,
+        min_funding_short_score=min_funding_short_score,
+        min_funding_short_quality=min_funding_short_quality,
+        min_short_activity_score=min_short_activity_score,
+        min_short_position_score=min_short_position_score,
+        min_unwind_risk=min_unwind_risk,
+    )
+    params.update({"limit": limit, "offset": offset})
+    count = pd.read_sql(
+        text(f"SELECT count(*) AS total FROM public.us_equities_short_analytics_latest WHERE {where}"),
+        engine, params=params,
+    )
+    frame = pd.read_sql(
+        text(
+            f"""
+            SELECT * FROM public.us_equities_short_analytics_latest
+            WHERE {where}
+            ORDER BY {sort_column} {direction} NULLS LAST, ticker ASC
+            LIMIT :limit OFFSET :offset
+            """
+        ),
+        engine, params=params,
+    )
+    return {
+        "count": len(frame), "total": int(count.iloc[0]["total"]),
+        "limit": limit, "offset": offset, "data": dataframe_to_records(frame),
+    }
+
+
+@app.get("/short-analytics/funding-shorts", operation_id="getTopFundingShorts")
+def get_top_funding_shorts(
+    limit: int = Query(25, ge=1, le=100),
+    sector: Optional[str] = None,
+    industry: Optional[str] = None,
+    min_score: float = Query(60, ge=0, le=100),
+    min_quality: float = Query(50, ge=0, le=100),
+):
+    return get_latest_short_analytics(
+        limit=limit, offset=0, ticker=None, sector=sector, industry=industry,
+        security_type="common_stock", regime=None, expected_si_direction=None,
+        min_funding_short_score=min_score, min_funding_short_quality=min_quality,
+        min_short_activity_score=None, min_short_position_score=None, min_unwind_risk=None,
+        sort_by="funding_short_score", sort_order="desc",
+    )
+
+
+@app.get("/short-analytics/latest/{ticker}", operation_id="getLatestShortAnalyticsTicker")
+def get_latest_short_analytics_ticker(ticker: str):
+    symbol = ticker.strip().upper()
+    frame = pd.read_sql(
+        text("SELECT * FROM public.us_equities_short_analytics_latest WHERE ticker = :ticker LIMIT 1"),
+        engine, params={"ticker": symbol},
+    )
+    if frame.empty:
+        raise HTTPException(status_code=404, detail="Short analytics ticker not found")
+    return {"ticker": symbol, "found": True, "data": normalize_row(frame.iloc[0].to_dict())}
     
 # ============================================================
 # EQUITIES ROUTES
