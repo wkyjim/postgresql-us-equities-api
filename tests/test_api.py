@@ -14,6 +14,37 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import main
 
 
+def test_build_neon_database_url_from_components(monkeypatch):
+    monkeypatch.delenv("NEON_DATABASE_URL", raising=False)
+    monkeypatch.delenv("neon_password", raising=False)
+    monkeypatch.setenv("NEON_DB_USER", "api_user")
+    monkeypatch.setenv("NEON_DB_PASSWORD", "p@ss:/word")
+    monkeypatch.setenv("NEON_DB_HOST", "pooler.example.neon.tech")
+    monkeypatch.setenv("NEON_DB_NAME", "market_data")
+
+    url = main.build_neon_database_url()
+
+    assert isinstance(url, main.URL)
+    assert url.username == "api_user"
+    assert url.password == "p@ss:/word"
+    assert url.host == "pooler.example.neon.tech"
+    assert url.database == "market_data"
+    assert url.port == 5432
+    assert dict(url.query) == {"sslmode": "require", "channel_binding": "require"}
+
+
+def test_build_neon_database_url_rejects_partial_components(monkeypatch):
+    monkeypatch.delenv("NEON_DATABASE_URL", raising=False)
+    monkeypatch.delenv("neon_password", raising=False)
+    monkeypatch.setenv("NEON_DB_USER", "api_user")
+    monkeypatch.delenv("NEON_DB_PASSWORD", raising=False)
+    monkeypatch.delenv("NEON_DB_HOST", raising=False)
+    monkeypatch.delenv("NEON_DB_NAME", raising=False)
+
+    with pytest.raises(ValueError, match="Incomplete Neon configuration"):
+        main.build_neon_database_url()
+
+
 def test_latest_macro_returns_data_source_from_query_result():
     frame = pd.DataFrame(
         [

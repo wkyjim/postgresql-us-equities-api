@@ -5,6 +5,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import date
+from pathlib import Path
 from typing import Optional, List
 
 import pandas as pd
@@ -14,24 +15,69 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from sqlalchemy import create_engine, text
+from sqlalchemy.engine import URL
 
 
 # ============================================================
 # ENV / DATABASE
 # ============================================================
 
-load_dotenv()
-
-neon_password = os.getenv("neon_password")
-
-if not neon_password:
-    raise ValueError("Missing environment variable: neon_password")
-
-NEON_DATABASE_URL = (
-    f"postgresql://neondb_owner:{neon_password}"
-    "@ep-aged-moon-ao3o4z0j-pooler.c-2.ap-southeast-1.aws.neon.tech/"
-    "neondb?sslmode=require&channel_binding=require"
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_EXTERNAL_ENV_DIR = (
+    PROJECT_ROOT.parent.parent / "DB_builder_env"
+    if PROJECT_ROOT.parent.name.casefold() == "hermes_pm"
+    else PROJECT_ROOT.parent / "DB_builder_env"
 )
+EXTERNAL_ENV_DIR = Path(
+    os.getenv("DB_BUILDER_ENV_DIR", str(DEFAULT_EXTERNAL_ENV_DIR))
+).expanduser()
+if os.getenv("DB_BUILDER_AUDIT_MODE", "").strip().lower() not in {"1", "true", "yes", "on"}:
+    load_dotenv(EXTERNAL_ENV_DIR / "neon-api" / ".env", override=False)
+
+def build_neon_database_url() -> str | URL:
+    direct_url = os.getenv("NEON_DATABASE_URL")
+    if direct_url:
+        return direct_url
+
+    component_names = ("NEON_DB_USER", "NEON_DB_PASSWORD", "NEON_DB_HOST", "NEON_DB_NAME")
+    components = {name: os.getenv(name) for name in component_names}
+    if all(components.values()):
+        try:
+            port = int(os.getenv("NEON_DB_PORT", "5432"))
+        except ValueError as exc:
+            raise ValueError("NEON_DB_PORT must be an integer") from exc
+        return URL.create(
+            drivername="postgresql+psycopg2",
+            username=components["NEON_DB_USER"],
+            password=components["NEON_DB_PASSWORD"],
+            host=components["NEON_DB_HOST"],
+            port=port,
+            database=components["NEON_DB_NAME"],
+            query={
+                "sslmode": os.getenv("NEON_DB_SSLMODE", "require"),
+                "channel_binding": os.getenv("NEON_DB_CHANNEL_BINDING", "require"),
+            },
+        )
+
+    neon_password = os.getenv("neon_password")
+    if neon_password:
+        return (
+            f"postgresql://neondb_owner:{neon_password}"
+            "@ep-aged-moon-ao3o4z0j-pooler.c-2.ap-southeast-1.aws.neon.tech/"
+            "neondb?sslmode=require&channel_binding=require"
+        )
+
+    supplied_components = [name for name, value in components.items() if value]
+    if supplied_components:
+        missing = [name for name, value in components.items() if not value]
+        raise ValueError(f"Incomplete Neon configuration; missing: {', '.join(missing)}")
+    raise ValueError(
+        "Missing Neon configuration: set NEON_DATABASE_URL or all NEON_DB_USER, "
+        "NEON_DB_PASSWORD, NEON_DB_HOST, and NEON_DB_NAME variables"
+    )
+
+
+NEON_DATABASE_URL = build_neon_database_url()
 
 engine = create_engine(
     NEON_DATABASE_URL,
@@ -40,6 +86,11 @@ engine = create_engine(
 )
 
 MAX_BATCH_ITEMS = 50
+PUBLIC_API_URL = (
+    os.getenv("PUBLIC_API_URL")
+    or os.getenv("MARKET_API_BASE_URL")
+    or ""
+).rstrip("/")
 
 
 # ============================================================
@@ -183,9 +234,7 @@ class TelegramWebhookResponse(BaseModel):
 app = FastAPI(
     title="US Equities API",
     version="1.1.0",
-    servers=[
-        {"url": "https://postgresql-us-equities-api.onrender.com"}
-    ],
+    servers=[{"url": PUBLIC_API_URL}] if PUBLIC_API_URL else None,
 )
 
 app.add_middleware(
