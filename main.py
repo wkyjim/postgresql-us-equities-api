@@ -86,11 +86,7 @@ engine = create_engine(
 )
 
 MAX_BATCH_ITEMS = 50
-PUBLIC_API_URL = (
-    os.getenv("PUBLIC_API_URL")
-    or os.getenv("MARKET_API_BASE_URL")
-    or ""
-).rstrip("/")
+MARKET_API_BASE_URL = os.getenv("MARKET_API_BASE_URL", "").rstrip("/")
 
 
 # ============================================================
@@ -170,7 +166,7 @@ class BatchEquityResponse(BaseModel):
 # ============================================================
 
 class MacroData(BaseModel):
-    date: Optional[str] = None
+    session_date: Optional[str] = None
     observed_at: Optional[str] = None
     symbol: Optional[str] = None
     name: Optional[str] = None
@@ -234,7 +230,7 @@ class TelegramWebhookResponse(BaseModel):
 app = FastAPI(
     title="US Equities API",
     version="1.1.0",
-    servers=[{"url": PUBLIC_API_URL}] if PUBLIC_API_URL else None,
+    servers=[{"url": MARKET_API_BASE_URL}] if MARKET_API_BASE_URL else None,
 )
 
 app.add_middleware(
@@ -265,7 +261,7 @@ def normalize_row(row: dict) -> dict:
             output[key] = None
         elif value is None or (not isinstance(value, (dict, list, tuple)) and pd.isna(value)):
             output[key] = None
-        elif key.endswith("_date") or key.endswith("_at") or key in {"date", "indicator_date", "market_date", "observed_at"}:
+        elif key.endswith("_date") or key.endswith("_at") or key in {"date", "session_date", "indicator_date", "market_date", "observed_at"}:
             output[key] = str(value)
         elif key == "regime_reason_json" and isinstance(value, str):
             try:
@@ -799,6 +795,7 @@ def root():
     "/telegram/webhook/info",
     response_model=TelegramWebhookResponse,
     operation_id="telegramWebhookInfo",
+    include_in_schema=False,
 )
 def telegram_webhook_info():
     return {
@@ -813,6 +810,7 @@ def telegram_webhook_info():
     "/telegram/webhook/register/{secret}",
     response_model=TelegramWebhookResponse,
     operation_id="registerTelegramWebhook",
+    include_in_schema=False,
 )
 def register_telegram_webhook(
     secret: str,
@@ -843,6 +841,7 @@ def register_telegram_webhook(
     "/telegram/webhook/{secret}",
     response_model=TelegramWebhookResponse,
     operation_id="telegramWebhook",
+    include_in_schema=False,
 )
 async def telegram_webhook(
     secret: str,
@@ -1292,7 +1291,7 @@ def get_latest_macro(symbol: str):
     sql = """
     WITH live_row AS (
         SELECT
-            market_date AS date, observed_at, symbol, name, asset_type,
+            market_date AS session_date, observed_at, symbol, name, asset_type,
             open, high, low, close, adj_close, volume,
             prev_close, change, pct_chg, amplitude,
             TRUE AS is_live, 'live' AS data_source
@@ -1304,7 +1303,7 @@ def get_latest_macro(symbol: str):
     ),
     close_row AS (
         SELECT
-            date, NULL::timestamptz AS observed_at, symbol, name, asset_type,
+            date AS session_date, NULL::timestamptz AS observed_at, symbol, name, asset_type,
             open, high, low, close, adj_close, volume,
             prev_close, change, pct_chg, amplitude,
             FALSE AS is_live, 'close' AS data_source
@@ -1361,7 +1360,7 @@ def get_latest_macros_batch(
     sql = """
     WITH live_latest AS (
         SELECT DISTINCT ON (symbol)
-            market_date AS date, observed_at, symbol, name, asset_type,
+            market_date AS session_date, observed_at, symbol, name, asset_type,
             open, high, low, close, adj_close, volume,
             prev_close, change, pct_chg, amplitude,
             TRUE AS is_live, 'live' AS data_source
@@ -1372,7 +1371,7 @@ def get_latest_macros_batch(
     ),
     close_latest AS (
         SELECT DISTINCT ON (symbol)
-            date, NULL::timestamptz AS observed_at, symbol, name, asset_type,
+            date AS session_date, NULL::timestamptz AS observed_at, symbol, name, asset_type,
             open, high, low, close, adj_close, volume,
             prev_close, change, pct_chg, amplitude,
             FALSE AS is_live, 'close' AS data_source
@@ -1381,7 +1380,12 @@ def get_latest_macros_batch(
         ORDER BY symbol, date DESC
     ),
     latest AS (
-        SELECT * FROM live_latest
+        SELECT live_latest.*
+        FROM live_latest
+        JOIN close_latest ON live_latest.symbol = close_latest.symbol
+        WHERE live_latest.session_date >= close_latest.session_date
+          AND live_latest.observed_at IS NOT NULL
+          AND live_latest.observed_at > now() - INTERVAL '4 hours'
         UNION ALL
         SELECT close_latest.*
         FROM close_latest
@@ -1389,6 +1393,9 @@ def get_latest_macros_batch(
             SELECT 1
             FROM live_latest
             WHERE live_latest.symbol = close_latest.symbol
+              AND live_latest.session_date >= close_latest.session_date
+              AND live_latest.observed_at IS NOT NULL
+              AND live_latest.observed_at > now() - INTERVAL '4 hours'
         )
     )
     SELECT *
@@ -1420,7 +1427,7 @@ def get_market_tape():
     sql = """
     WITH live_latest AS (
         SELECT DISTINCT ON (symbol)
-            market_date AS date, observed_at, symbol, name, asset_type,
+            market_date AS session_date, observed_at, symbol, name, asset_type,
             open, high, low, close, adj_close, volume,
             prev_close, change, pct_chg, amplitude,
             TRUE AS is_live, 'live' AS data_source
@@ -1431,7 +1438,7 @@ def get_market_tape():
     ),
     close_latest AS (
         SELECT DISTINCT ON (symbol)
-            date, NULL::timestamptz AS observed_at, symbol, name, asset_type,
+            date AS session_date, NULL::timestamptz AS observed_at, symbol, name, asset_type,
             open, high, low, close, adj_close, volume,
             prev_close, change, pct_chg, amplitude,
             FALSE AS is_live, 'close' AS data_source
@@ -1440,14 +1447,24 @@ def get_market_tape():
         ORDER BY symbol, date DESC
     ),
     latest AS (
-        SELECT * FROM live_latest
+        -- Use live only if: source is valid AND session_date >= close.session_date AND observed_at is fresh
+        SELECT live_latest.*
+        FROM live_latest
+        JOIN close_latest ON live_latest.symbol = close_latest.symbol
+        WHERE live_latest.session_date >= close_latest.session_date
+          AND live_latest.observed_at IS NOT NULL
+          AND live_latest.observed_at > now() - INTERVAL '4 hours'
         UNION ALL
+        -- Fallback to close when live is stale, wrong source, or missing
         SELECT close_latest.*
         FROM close_latest
         WHERE NOT EXISTS (
             SELECT 1
             FROM live_latest
             WHERE live_latest.symbol = close_latest.symbol
+              AND live_latest.session_date >= close_latest.session_date
+              AND live_latest.observed_at IS NOT NULL
+              AND live_latest.observed_at > now() - INTERVAL '4 hours'
         )
     )
     SELECT *
@@ -1490,7 +1507,7 @@ def get_live_macro(symbol: str):
     normalized_symbol = normalize_macro_symbol(symbol)
     sql = """
     SELECT
-        market_date AS date, observed_at, symbol, name, asset_type,
+        market_date AS session_date, observed_at, symbol, name, asset_type,
         open, high, low, close, adj_close, volume,
         prev_close, change, pct_chg, amplitude,
         TRUE AS is_live, 'live' AS data_source
@@ -1532,7 +1549,7 @@ def get_live_macros_batch(
     symbol_lookup = macro_lookup_values(symbol_list)
     sql = """
     SELECT
-        market_date AS date, observed_at, symbol, name, asset_type,
+        market_date AS session_date, observed_at, symbol, name, asset_type,
         open, high, low, close, adj_close, volume,
         prev_close, change, pct_chg, amplitude,
         TRUE AS is_live, 'live' AS data_source
@@ -1562,7 +1579,7 @@ def get_macro_by_date(
     normalized_symbol = normalize_macro_symbol(symbol)
     sql = """
     SELECT
-        date, NULL::timestamptz AS observed_at, symbol, name, asset_type,
+        date AS session_date, NULL::timestamptz AS observed_at, symbol, name, asset_type,
         open, high, low, close, adj_close, volume,
         prev_close, change, pct_chg, amplitude,
         FALSE AS is_live, 'close' AS data_source
