@@ -34,10 +34,24 @@ EXTERNAL_ENV_DIR = Path(
 if os.getenv("DB_BUILDER_AUDIT_MODE", "").strip().lower() not in {"1", "true", "yes", "on"}:
     load_dotenv(EXTERNAL_ENV_DIR / "neon-api" / ".env", override=False)
 
+def _force_psycopg2(url: str) -> str:
+    """Pin the DBAPI driver on a URL supplied through the environment.
+
+    SQLAlchemy 2.1 changed the default driver for a bare ``postgresql://``
+    scheme to psycopg (v3). This image installs ``psycopg2-binary`` only, so
+    an unpinned URL makes the API crash-loop at import with
+    ``ModuleNotFoundError: No module named 'psycopg'``.
+    """
+    for scheme in ("postgresql://", "postgres://"):
+        if url.startswith(scheme):
+            return "postgresql+psycopg2://" + url[len(scheme):]
+    return url
+
+
 def build_neon_database_url() -> str | URL:
     direct_url = os.getenv("NEON_DATABASE_URL")
     if direct_url:
-        return direct_url
+        return _force_psycopg2(direct_url)
 
     component_names = ("NEON_DB_USER", "NEON_DB_PASSWORD", "NEON_DB_HOST", "NEON_DB_NAME")
     components = {name: os.getenv(name) for name in component_names}
@@ -62,7 +76,7 @@ def build_neon_database_url() -> str | URL:
     neon_password = os.getenv("neon_password")
     if neon_password:
         return (
-            f"postgresql://neondb_owner:{neon_password}"
+            f"postgresql+psycopg2://neondb_owner:{neon_password}"
             "@ep-aged-moon-ao3o4z0j-pooler.c-2.ap-southeast-1.aws.neon.tech/"
             "neondb?sslmode=require&channel_binding=require"
         )

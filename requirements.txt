@@ -1,6 +1,10 @@
 fastapi
 uvicorn
-sqlalchemy
+# Pinned: SQLAlchemy 2.1 changed the default driver for a bare postgresql://
+# scheme to psycopg (v3). requirements.txt was unpinned, so an image rebuild
+# silently pulled 2.1.6 and the API crash-looped with
+# ModuleNotFoundError: No module named 'psycopg'.
+sqlalchemy>=2.0,<2.1
 psycopg2-binary
 pandas
 python-dotenv

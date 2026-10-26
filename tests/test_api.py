@@ -440,3 +440,31 @@ def test_short_analytics_ticker_lookup_and_not_found():
         with pytest.raises(HTTPException) as exc:
             main.get_latest_short_analytics_ticker("missing")
     assert exc.value.status_code == 404
+
+
+def test_database_url_pins_psycopg2_driver(monkeypatch):
+    """A bare postgresql:// URL must be rewritten to psycopg2.
+
+    SQLAlchemy 2.1 changed the default driver for a bare postgresql:// scheme to
+    psycopg (v3). The image installs psycopg2-binary only, so leaving the URL
+    unpinned crash-loops the API at import with ModuleNotFoundError.
+    """
+    monkeypatch.setenv("NEON_DB_USER", "u")
+    monkeypatch.setenv("NEON_DB_PASSWORD", "p")
+    monkeypatch.setenv("NEON_DB_HOST", "h")
+    monkeypatch.setenv("NEON_DB_NAME", "d")
+    monkeypatch.setenv("NEON_DATABASE_URL", "postgresql://u:p@h/d")
+
+    import importlib
+
+    importlib.reload(main)
+
+    assert "psycopg2" in str(main.NEON_DATABASE_URL)
+
+
+def test_bare_postgres_scheme_is_normalised(monkeypatch):
+    monkeypatch.setattr(main, "NEON_DATABASE_URL", "postgres://u:p@h/d")
+    assert main._force_psycopg2("postgres://u:p@h/d").startswith("postgresql+psycopg2://")
+    # Already-pinned URLs are left alone.
+    pinned = "postgresql+psycopg2://u:p@h/d"
+    assert main._force_psycopg2(pinned) == pinned
