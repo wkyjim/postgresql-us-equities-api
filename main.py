@@ -209,6 +209,7 @@ class MarketTapeItem(MacroData):
 class MarketTapeResponse(BaseModel):
     count: int
     groups: dict[str, List[MarketTapeItem]]
+    group_titles: dict[str, str] = {}
     data: List[MarketTapeItem]
 
 
@@ -416,8 +417,6 @@ MARKET_TAPE_GROUPS = {
         ("DX-Y.NYB", "Dollar Index"),
     ],
     "oil": [
-        ("WTI_OILPRICE", "WTI Crude Spot"),
-        ("BRENT_OILPRICE", "Brent Crude Spot"),
         ("CL=F", "WTI Crude Future"),
         ("BZ=F", "Brent Crude Future"),
         ("NG=F", "Natural Gas Future"),
@@ -452,6 +451,24 @@ MARKET_TAPE_GROUPS = {
 }
 
 
+# Display titles are served alongside the groups so the dashboard and the API
+# cannot drift apart on naming or membership.
+MARKET_TAPE_GROUP_TITLES = {
+    "equity_indices": "Global Equity Indices",
+    "index_futures": "Equity Index Futures",
+    "fx_spot": "FX Spot",
+    "oil": "Oil & Energy",
+    "crypto": "Crypto",
+    "ust_yields": "UST Yield Curve",
+    "ust_yields_cmt": "UST Yield Curve (Treasury CMT)",
+    "volatility": "Volatility",
+}
+
+
+def market_tape_group_titles() -> dict[str, str]:
+    return {group: MARKET_TAPE_GROUP_TITLES.get(group, group) for group in MARKET_TAPE_GROUPS}
+
+
 def market_tape_symbols() -> list[str]:
     symbols = []
     for rows in MARKET_TAPE_GROUPS.values():
@@ -474,7 +491,9 @@ def add_market_tape_fields(row: dict, metadata: dict[str, tuple[str, str]]) -> d
     enriched["group"] = group
     enriched["display_name"] = label
     enriched["change_bps"] = None
-    if group == "ust_yields" and enriched.get("change") is not None:
+    # Yield rows move in basis points, not percent: change is in yield units
+    # (e.g. -0.04), so x100 gives bps. Only the curve groups carry this.
+    if group in ("ust_yields", "ust_yields_cmt") and enriched.get("change") is not None:
         enriched["change_bps"] = round(float(enriched["change"]) * 100, 4)
     return enriched
 
@@ -1539,6 +1558,7 @@ def get_market_tape():
     return {
         "count": len(ordered_records),
         "groups": groups,
+        "group_titles": market_tape_group_titles(),
         "data": ordered_records,
     }
 
