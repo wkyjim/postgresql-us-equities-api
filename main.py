@@ -435,6 +435,11 @@ MARKET_TAPE_GROUPS = {
         ("BZ=F", "Brent Crude Future"),
         ("NG=F", "Natural Gas Future"),
     ],
+    "commodities": [
+        ("GC=F", "Gold"),
+        ("SI=F", "Silver"),
+        ("HG=F", "Copper"),
+    ],
     "crypto": [
         ("BTC-USD", "Bitcoin"),
         ("ETH-USD", "Ethereum"),
@@ -472,6 +477,7 @@ MARKET_TAPE_GROUP_TITLES = {
     "index_futures": "Equity Index Futures",
     "fx_spot": "FX Spot",
     "oil": "Oil & Energy",
+    "commodities": "Commodities",
     "crypto": "Crypto",
     "ust_yields": "UST Yield Curve",
     "ust_yields_cmt": "UST Yield Curve (Treasury CMT)",

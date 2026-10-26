@@ -321,6 +321,7 @@ def test_market_tape_covers_every_requested_asset_class():
         "index_futures",
         "fx_spot",
         "oil",
+        "commodities",
         "crypto",
         "ust_yields",
         "ust_yields_cmt",
@@ -331,11 +332,23 @@ def test_market_tape_covers_every_requested_asset_class():
     # No symbol may appear in two groups -- the tape would report it twice.
     assert len(symbols) == len(set(symbols))
 
-    for group in ("fx_spot", "oil", "crypto", "ust_yields_cmt"):
+    for group in ("fx_spot", "oil", "commodities", "crypto", "ust_yields_cmt"):
         rows = main.MARKET_TAPE_GROUPS[group]
         assert rows, f"{group} is empty"
         for symbol, label in rows:
             assert symbol and label, f"{group} has an unlabelled symbol"
+
+
+def test_market_tape_group_titles_cover_every_group():
+    """Every group must have a display title.
+
+    The dashboard renders group_titles straight from the API, so a group added
+    without a title would show up as a raw snake_case key.
+    """
+    titles = main.market_tape_group_titles()
+    assert set(titles) == set(main.MARKET_TAPE_GROUPS)
+    for group, title in titles.items():
+        assert title and "_" not in title, f"{group} has no human-readable title"
 
 
 def test_market_tape_symbols_all_exist_in_macro():
