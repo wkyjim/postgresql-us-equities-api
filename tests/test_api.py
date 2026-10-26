@@ -339,6 +339,20 @@ def test_market_tape_covers_every_requested_asset_class():
             assert symbol and label, f"{group} has an unlabelled symbol"
 
 
+def test_market_tape_includes_oilpriceapi_spot_series():
+    """OilPriceAPI spot Brent/WTI must appear on the tape.
+
+    They are the only spot (non-futures) oil series in the pipeline and are
+    fetched from a separate provider with a hard daily call quota, so they are
+    easy to drop by accident when the group list is edited.
+    """
+    oil = dict(main.MARKET_TAPE_GROUPS["oil"])
+    assert "BRENT_OILPRICE" in oil
+    assert "WTI_OILPRICE" in oil
+    assert "CL=F" in oil
+    assert "BZ=F" in oil
+
+
 def test_market_tape_group_titles_cover_every_group():
     """Every group must have a display title.
 

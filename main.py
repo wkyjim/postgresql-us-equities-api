@@ -434,6 +434,8 @@ MARKET_TAPE_GROUPS = {
         ("CL=F", "WTI Crude Future"),
         ("BZ=F", "Brent Crude Future"),
         ("NG=F", "Natural Gas Future"),
+        ("BRENT_OILPRICE", "Brent Crude Spot"),
+        ("WTI_OILPRICE", "WTI Crude Spot"),
     ],
     "commodities": [
         ("GC=F", "Gold"),
