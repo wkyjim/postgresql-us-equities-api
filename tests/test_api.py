@@ -1,3 +1,4 @@
+import importlib
 import os
 import sys
 from pathlib import Path
@@ -12,6 +13,43 @@ os.environ.setdefault("neon_password", "test-only")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import main
+
+
+def openapi_for_market_api_url(monkeypatch, value: str | None) -> dict:
+    with monkeypatch.context() as environment:
+        if value is None:
+            environment.delenv("MARKET_API_BASE_URL", raising=False)
+        else:
+            environment.setenv("MARKET_API_BASE_URL", value)
+        schema = importlib.reload(main).app.openapi()
+
+    importlib.reload(main)
+    return schema
+
+
+def test_openapi_hides_internal_telegram_endpoints():
+    paths = main.app.openapi()["paths"]
+
+    assert {
+        "/telegram/webhook/info",
+        "/telegram/webhook/register/{secret}",
+        "/telegram/webhook/{secret}",
+    }.isdisjoint(paths)
+
+
+def test_openapi_servers_uses_market_api_base_url(monkeypatch):
+    schema = openapi_for_market_api_url(
+        monkeypatch, "https://market-api.example.test/"
+    )
+
+    assert schema["servers"] == [{"url": "https://market-api.example.test"}]
+
+
+def test_openapi_remains_valid_without_market_api_base_url(monkeypatch):
+    schema = openapi_for_market_api_url(monkeypatch, None)
+
+    assert "servers" not in schema
+    assert schema["paths"]
 
 
 def test_build_neon_database_url_from_components(monkeypatch):
@@ -262,12 +300,63 @@ def test_market_tape_groups_asia_futures_and_ust_bps():
         response = main.get_market_tape()
 
     assert response["count"] == 3
-    assert response["groups"]["asia_equity_indices"][0]["symbol"] == "^HSI"
+    assert response["groups"]["equity_indices"][0]["symbol"] == "^HSI"
     assert response["groups"]["index_futures"][0]["symbol"] == "NQ=F"
     ust = response["groups"]["ust_yields"][0]
     assert ust["symbol"] == "US10YT=X"
     assert ust["display_name"] == "UST 10Y"
     assert ust["change_bps"] == 4.25
+
+
+def test_market_tape_covers_every_requested_asset_class():
+    """The tape must carry equity indices, index futures, fx, oil, crypto and the curve.
+
+    Each class is a distinct provider path (Eastmoney indices, Investing.com
+    futures, yfinance fx, OilPriceAPI spot crude, yfinance crypto, Treasury
+    CMT yields), so a missing group means a whole asset class silently
+    disappears from the dashboard.
+    """
+    required = {
+        "equity_indices",
+        "index_futures",
+        "fx_spot",
+        "oil",
+        "crypto",
+        "ust_yields",
+        "ust_yields_cmt",
+    }
+    assert required <= set(main.MARKET_TAPE_GROUPS)
+
+    symbols = main.market_tape_symbols()
+    # No symbol may appear in two groups -- the tape would report it twice.
+    assert len(symbols) == len(set(symbols))
+
+    for group in ("fx_spot", "oil", "crypto", "ust_yields_cmt"):
+        rows = main.MARKET_TAPE_GROUPS[group]
+        assert rows, f"{group} is empty"
+        for symbol, label in rows:
+            assert symbol and label, f"{group} has an unlabelled symbol"
+
+
+def test_market_tape_symbols_all_exist_in_macro():
+    """Every tape symbol must resolve to a row in public.macro.
+
+    A typo here yields a group that renders empty with no error, which is how
+    the fx and oil classes were missing for so long. Skips when the local
+    database is not reachable from this process (e.g. the API container).
+    """
+    pytest.importorskip("db_builder")
+    from sqlalchemy import text
+
+    from db_builder.config import local_engine
+
+    with local_engine().connect() as conn:
+        present = {
+            row[0]
+            for row in conn.execute(text("SELECT DISTINCT symbol FROM public.macro"))
+        }
+    missing = [s for s in main.market_tape_symbols() if s not in present]
+    assert not missing, f"market-tape symbols absent from public.macro: {missing}"
 
 
 def test_equity_history_contains_ohlcv_fields_for_candlestick_chart():

@@ -375,10 +375,21 @@ def validate_iso_date(value: str) -> str:
         ) from exc
 
 
+# Every symbol below must exist in public.macro (EOD) and, when the market is
+# open, public.macro_live. Group names are part of the public API -- the
+# market-dashboard reads `index_futures`, so that one is not renamed.
 MARKET_TAPE_GROUPS = {
-    "asia_equity_indices": [
-        ("^HSI", "Hang Seng"),
+    "equity_indices": [
+        ("^GSPC", "S&P 500"),
+        ("^DJI", "Dow Jones"),
+        ("^IXIC", "Nasdaq Composite"),
+        ("^NDX", "Nasdaq 100"),
+        ("^RUT", "Russell 2000"),
+        ("^FTSE", "FTSE 100"),
+        ("^GDAXI", "DAX"),
+        ("^FCHI", "CAC 40"),
         ("^N225", "Nikkei 225"),
+        ("^HSI", "Hang Seng"),
         ("^KS11", "KOSPI"),
         ("000001.SS", "SSE Composite"),
     ],
@@ -392,6 +403,29 @@ MARKET_TAPE_GROUPS = {
         ("KOR200c1", "KOSPI 200 Future"),
         ("CIHc1", "SSE 50 Future"),
     ],
+    "fx_spot": [
+        ("EURUSD=X", "EUR/USD"),
+        ("GBPUSD=X", "GBP/USD"),
+        ("AUDUSD=X", "AUD/USD"),
+        ("NZDUSD=X", "NZD/USD"),
+        ("CHFUSD=X", "CHF/USD"),
+        ("JPY=X", "USD/JPY"),
+        ("CNY=X", "USD/CNY"),
+        ("HKD=X", "USD/HKD"),
+        ("SGD=X", "USD/SGD"),
+        ("DX-Y.NYB", "Dollar Index"),
+    ],
+    "oil": [
+        ("WTI_OILPRICE", "WTI Crude Spot"),
+        ("BRENT_OILPRICE", "Brent Crude Spot"),
+        ("CL=F", "WTI Crude Future"),
+        ("BZ=F", "Brent Crude Future"),
+        ("NG=F", "Natural Gas Future"),
+    ],
+    "crypto": [
+        ("BTC-USD", "Bitcoin"),
+        ("ETH-USD", "Ethereum"),
+    ],
     "ust_yields": [
         ("US2YT=X", "UST 2Y"),
         ("US3YT=X", "UST 3Y"),
@@ -401,8 +435,18 @@ MARKET_TAPE_GROUPS = {
         ("US20YT=X", "UST 20Y"),
         ("US30YT=X", "UST 30Y"),
     ],
+    "ust_yields_cmt": [
+        ("US2YT_CMT", "UST 2Y (CMT)"),
+        ("US3YT_CMT", "UST 3Y (CMT)"),
+        ("US5YT_CMT", "UST 5Y (CMT)"),
+        ("US7YT_CMT", "UST 7Y (CMT)"),
+        ("US10YT_CMT", "UST 10Y (CMT)"),
+        ("US20YT_CMT", "UST 20Y (CMT)"),
+        ("US30YT_CMT", "UST 30Y (CMT)"),
+    ],
     "volatility": [
         ("^VIX", "VIX"),
+        ("^MOVE", "ICE BofA MOVE"),
         ("^SKEW", "CBOE SKEW"),
     ],
 }
@@ -1289,19 +1333,7 @@ def get_equity_by_date(
 def get_latest_macro(symbol: str):
     requested_symbol = normalize_macro_symbol(symbol)
     sql = """
-    WITH live_row AS (
-        SELECT
-            market_date AS session_date, observed_at, symbol, name, asset_type,
-            open, high, low, close, adj_close, volume,
-            prev_close, change, pct_chg, amplitude,
-            TRUE AS is_live, 'live' AS data_source
-        FROM public.macro_live
-        WHERE lower(symbol) = :symbol_lookup
-          AND is_market_closed = FALSE
-        ORDER BY observed_at DESC
-        LIMIT 1
-    ),
-    close_row AS (
+    WITH close_latest AS (
         SELECT
             date AS session_date, NULL::timestamptz AS observed_at, symbol, name, asset_type,
             open, high, low, close, adj_close, volume,
@@ -1311,10 +1343,23 @@ def get_latest_macro(symbol: str):
         WHERE lower(symbol) = :symbol_lookup
         ORDER BY date DESC
         LIMIT 1
+    ),
+    live_row AS (
+        SELECT
+            market_date AS session_date, observed_at, symbol, name, asset_type,
+            open, high, low, close, adj_close, volume,
+            prev_close, change, pct_chg, amplitude,
+            TRUE AS is_live, 'live' AS data_source
+        FROM public.macro_live
+        WHERE lower(symbol) = :symbol_lookup
+          AND is_market_closed = FALSE
+          AND market_date >= (SELECT MAX(date) FROM public.macro WHERE lower(symbol) = :symbol_lookup)
+        ORDER BY observed_at DESC
+        LIMIT 1
     )
     SELECT * FROM live_row
     UNION ALL
-    SELECT * FROM close_row
+    SELECT * FROM close_latest
     WHERE NOT EXISTS (SELECT 1 FROM live_row)
     LIMIT 1
     """
